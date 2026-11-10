@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Offline gcloud stub for tests. Logs args to $GCLOUD_STUB_LOG, never touches GCP.
+# GCLOUD_STUB_FAIL_DESCRIBE=1 makes "describe" calls fail (resource missing).
+# GCLOUD_STUB_NO_ACCOUNT=1 makes "auth list" print nothing.
+log="${GCLOUD_STUB_LOG:-/dev/null}"
+printf '%s\n' "$*" >> "$log"
+case "$*" in
+  *"auth list"*) [[ "${GCLOUD_STUB_NO_ACCOUNT:-0}" == "1" ]] || echo "stub@example.com" ;;
+  *describe*) [[ "${GCLOUD_STUB_FAIL_DESCRIBE:-0}" != "1" ]] || exit 1; echo "stub-resource" ;;
+esac
+exit 0
