@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: __NAME__-app, labels: {app: __NAME__-app}}
+spec:
+  replicas: 3
+  selector: {matchLabels: {app: __NAME__-app}}
+  template:
+    metadata: {labels: {app: __NAME__-app}}
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector: {matchLabels: {app: __NAME__-app}}
+      containers:
+        - name: web
+          image: us-docker.pkg.dev/google-samples/containers/gke/hello-app:2.0
+          ports: [{containerPort: 8080}]
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: 250m, memory: 256Mi}
+          readinessProbe: {httpGet: {path: /, port: 8080}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: __NAME__-app}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app: __NAME__-app}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: __NAME__-app
+  annotations: {cloud.google.com/neg: '{"ingress": true}'}
+spec:
+  type: ClusterIP
+  selector: {app: __NAME__-app}
+  ports: [{port: 80, targetPort: 8080}]
