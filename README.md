@@ -30,7 +30,18 @@ tests/                 test runner (run_all.sh) and tests for lib/
 Scripts `source lib/common.sh`, which provides `log_info`, `log_warn`, `die`, `require_cmd`,
 `run` (prints commands; only prints when `DRY_RUN=1`), `parse_common_args`
 (`--project-id`, `--name`, `--region`, `--dry-run`, `--help`), `preflight`, `ensure_apis`
-and `resource_exists`. Every `gcloud` call passes `--project "$PROJECT_ID"` explicitly.
+and `resource_exists`, plus `detect_public_ipv4` / `set_allowed_ip_cidr` (auto-detect the caller's
+public IPv4 via `curl -4` against checkip.amazonaws.com → api.ipify.org → ifconfig.me; sets
+`ALLOWED_IP_CIDR=<ip>/32`). Every `gcloud` call passes `--project "$PROJECT_ID"` explicitly.
+
+### Cloud Armor allow-IP is auto-detected
+
+Neither flavor takes an `--allowed-ip` flag (passing it is an error). `create.sh` detects the public
+IPv4 of the machine it runs on (also during `--dry-run`; it is a local network call, not GCP) and
+Cloud Armor allows only that `/32`. Re-running `create.sh` from a different network re-detects the IP
+and **updates** the allow rule; VPN/proxy/CGNAT egress addresses are detected as-is, so check the logged
+`Cloud Armor will allow only <ip>/32 (auto-detected)` line. Tests stub `curl` (`lib/test_stub/curl`), so
+no real network is used.
 
 ## Prerequisites
 
@@ -47,7 +58,7 @@ Offline checks only (no GCP access required); these are the commands used to val
 bash tests/run_all.sh
 
 # lint
-shellcheck lib/common.sh lib/test_stub/gcloud tests/*.sh
+shellcheck -x lib/common.sh lib/test_stub/gcloud lib/test_stub/curl tests/*.sh
 ```
 
 See each flavor's README for its own commands.

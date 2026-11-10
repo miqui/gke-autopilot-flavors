@@ -3,7 +3,7 @@
 Bash wrapping `gcloud` (GKE **Autopilot only**). Shared helpers come from `../lib/common.sh`.
 
 ```
-                       Internet (only --allowed-ip passes Cloud Armor, rest = 403)
+                       Internet (only the auto-detected caller IP/32 passes Cloud Armor, rest = 403)
                                       |
                         Cloudflare DNS (grey cloud / DNS-only)
                          A  app.maqlabs.ai -> global static IP
@@ -38,11 +38,23 @@ Not chosen (documented only):
 ## Usage
 
 ```
-./create.sh  --project-id P --name N --domain app.maqlabs.ai --allowed-ip 203.0.113.7 \
-             --authorized-networks 198.51.100.0/24 [--region-a us-central1] [--region-b us-east1] [--dry-run]
+./create.sh  --project-id P --name N --domain app.maqlabs.ai \
+             [--authorized-networks 198.51.100.0/24] [--region-a us-central1] [--region-b us-east1] [--dry-run]
 ./verify.sh  --project-id P --name N [--region-a ..] [--region-b ..]     # read-only
 ./destroy.sh --project-id P --name N --yes [--region-a ..] [--region-b ..] [--dry-run]
 ```
+
+| Flag (create.sh) | Required | Notes |
+|---|---|---|
+| `--project-id`, `--name` | yes | |
+| `--domain` | yes | FQDN served by the LB |
+| `--authorized-networks` | no | comma CIDRs for the control planes; default = auto-detected `<ip>/32`; `/0` rejected |
+| `--region-a` / `--region-b` | no | defaults `us-central1` / `us-east1`; must differ |
+| `--dry-run` | no | print commands only |
+
+There is **no `--allowed-ip` flag** (passing it is an "Unknown argument" error). `create.sh` auto-detects the public IPv4 of the machine it runs on (`curl -4` against checkip.amazonaws.com, then api.ipify.org, then ifconfig.me; strict IPv4; private/loopback/link-local/`0.0.0.0` rejected; fails if none works) and Cloud Armor allows only `<that-ip>/32`. Detection is a local network call, so it also runs under `--dry-run`.
+
+> **Warning:** re-running `create.sh` from a different network re-detects the IP and **updates** Armor rule 1000 (`security-policies rules update`), locking out the previous IP. Behind a VPN, proxy or CGNAT the detected address is the egress address (possibly shared or changing), not necessarily your machine's — check the `Cloud Armor will allow only ...` log line.
 
 `create.sh` is re-runnable (each resource is describe-checked first). At the end it **prints the DNS records** to add in Cloudflare, both **DNS only (grey cloud, not proxied)**:
 
@@ -56,12 +68,12 @@ Not chosen (documented only):
 - One zone down: that region's other zones' NEGs keep serving; the PDB (`minAvailable: 2`) and zone spread keep pods up.
 - One region down or unhealthy: LB health checks mark its NEG endpoints unhealthy and traffic goes to the other region (RATE balancing allows spillover).
 - Both regions down: the LB returns 502; nothing serves.
-- Traffic from any IP other than `--allowed-ip`: 403 from Cloud Armor (default rule, priority 2147483647).
+- Traffic from any IP other than the auto-detected `<ip>/32`: 403 from Cloud Armor (default rule, priority 2147483647).
 - Health-check firewall missing or wrong port: all endpoints show UNHEALTHY → 502. The flavor creates the rule for 130.211.0.0/22 and 35.191.0.0/16 on tcp:8080; keep it.
 - Certificate stuck in PROVISIONING: the ACME CNAME is missing or proxied in Cloudflare; HTTPS handshakes fail until ACTIVE.
 - NEGs not yet created: `attach_negs.sh` waits (up to ~5 min), then fails; re-run it once pods are ready.
 - Control plane unreachable from your machine: your IP isn't in `--authorized-networks`.
-- Config drift: Cloud Armor allow-IP changes are applied by re-running `create.sh` with a new `--allowed-ip`.
+- Config drift: Cloud Armor allow-IP changes are applied by re-running `create.sh` from the new network (the IP is re-detected and rule 1000 is updated).
 
 ## Cost notes
 
@@ -76,17 +88,20 @@ Run `destroy.sh --yes` when done.
 
 ## Run manually
 
-Only offline validation was executed (no GCP resources touched; `gcloud` replaced by `../lib/test_stub/gcloud` in tests). Real `--dry-run` output (excerpt, `./create.sh --project-id my-proj --name mrha --domain app.maqlabs.ai --allowed-ip 203.0.113.7 --authorized-networks 198.51.100.0/24 --dry-run`):
+Only offline validation was executed (no GCP resources touched; `gcloud` replaced by `../lib/test_stub/gcloud` in tests). Real `--dry-run` output (excerpt, `./create.sh --project-id my-proj --name mrha --domain app.maqlabs.ai --authorized-networks 198.51.100.0/24 --dry-run`). **The IP `203.0.113.7` came from a stub `curl` (`lib/test_stub/curl`, documentation-range address), not real detection**; on your machine it shows your own detected IP:
 
 ```
+[INFO] Cloud Armor will allow only 203.0.113.7/32 (auto-detected)
 [INFO] dry-run: skipping gcloud auth checks
-[DRY-RUN] gcloud services enable compute.googleapis.com container.googleapis.com certificatemanager.googleapis.com --project my-proj
 [INFO] creating: vpc mrha-vpc
-[DRY-RUN] gcloud compute networks create mrha-vpc --subnet-mode custom --project my-proj
 [INFO] creating: nat mrha-nat-us-central1
 [DRY-RUN] gcloud compute routers nats create mrha-nat-us-central1 --router mrha-rtr-us-central1 --region us-central1 --auto-allocate-nat-external-ips --nat-all-subnet-ip-ranges --project my-proj
+[INFO] creating: cloud armor policy mrha-armor
+[DRY-RUN] gcloud compute security-policies create mrha-armor --description allow\ only\ 203.0.113.7/32 --project my-proj
+[DRY-RUN] gcloud compute security-policies rules update 2147483647 --security-policy mrha-armor --action deny-403 --project my-proj
+[DRY-RUN] gcloud compute security-policies rules create 1000 --security-policy mrha-armor --src-ip-ranges 203.0.113.7/32 --action allow --description caller\ IP\ only --project my-proj
 [INFO] creating: backend service mrha-backend
-[DRY-RUN] gcloud compute backend-services create mrha-backend --global --load-balancing-scheme EXTERNAL_MANAGED --protocol HTTP --health-checks mrha-hc ...
+[DRY-RUN] gcloud compute backend-services create mrha-backend --global --load-balancing-scheme EXTERNAL_MANAGED --protocol HTTP --health-checks mrha-hc --global-health-checks --connection-draining-timeout 60 --security-policy mrha-armor --project my-proj
 [INFO] [dry-run] no NEGs discovered; would attach each zonal NEG
 === Add these records in Cloudflare (DNS only / grey cloud, NOT proxied) ===
   CNAME  <run: gcloud certificate-manager dns-authorizations describe mrha-dnsauth>  ->  <see above>
@@ -99,7 +114,7 @@ Only offline validation was executed (no GCP resources touched; `gcloud` replace
 [ERROR] refusing to destroy without --yes
 ```
 
-Offline tests: `bash tests/test_multi.sh` (shellcheck + dry-run assertions + stub-driven destroy/verify).
+Offline tests: `bash tests/test_multi.sh` (shellcheck + dry-run assertions + stub gcloud/curl-driven destroy/verify/IP detection).
 
 ## Production checklist
 

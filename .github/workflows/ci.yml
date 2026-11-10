@@ -14,10 +14,11 @@ jobs:
         run: |
           find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -n1 bash -n
           bash -n lib/test_stub/gcloud
+          bash -n lib/test_stub/curl
       - name: shellcheck
         run: |
           find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 shellcheck
-          shellcheck lib/test_stub/gcloud
+          shellcheck lib/test_stub/gcloud lib/test_stub/curl
   test:
     runs-on: ubuntu-latest
     steps:

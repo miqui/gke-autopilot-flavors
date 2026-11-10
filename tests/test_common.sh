@@ -47,5 +47,16 @@ if [[ ! -s "$GCLOUD_STUB_LOG" ]]; then ok "dry-run made no gcloud call"; else fa
 t "resource_exists true" 0 'resource_exists gcloud x describe y --project p'
 t "resource_exists false" 1 'export GCLOUD_STUB_FAIL_DESCRIBE=1; resource_exists gcloud x describe y --project p'
 t "resource_exists dry-run" 1 'DRY_RUN=1; resource_exists gcloud x describe y'
+t "detect_public_ipv4 success" 0 'ip="$(detect_public_ipv4)"; [[ $ip == 203.0.113.7 ]]'
+t "detect falls back to 2nd URL" 0 'export CURL_STUB_FAIL=checkip.amazonaws.com CURL_STUB_LOG='"$TMP"'/c.log; [[ "$(detect_public_ipv4)" == 203.0.113.7 ]]; grep -q api.ipify.org '"$TMP"'/c.log'
+t "detect all fail dies" 1 'export CURL_STUB_ALL_FAIL=1; detect_public_ipv4'; has "detect fail msg" "could not auto-detect"
+t "detect rejects private 10/8" 1 'export CURL_STUB_IP=10.0.0.5; detect_public_ipv4'
+t "detect rejects 192.168/16" 1 'export CURL_STUB_IP=192.168.0.5; detect_public_ipv4'
+t "detect rejects loopback" 1 'export CURL_STUB_IP=127.0.0.1; detect_public_ipv4'
+t "detect rejects link-local" 1 'export CURL_STUB_IP=169.254.0.1; detect_public_ipv4'
+t "detect rejects 0.0.0.0" 1 'export CURL_STUB_IP=0.0.0.0; detect_public_ipv4'
+t "detect rejects octet>255" 1 'export CURL_STUB_IP=256.1.1.1; detect_public_ipv4'
+t "detect rejects html junk" 1 'export CURL_STUB_IP="<html>1.2.3.4</html>"; detect_public_ipv4'
+t "set_allowed_ip_cidr sets /32" 0 'set_allowed_ip_cidr; [[ $ALLOWED_IP_CIDR == 203.0.113.7/32 ]]'; has "set_allowed_ip_cidr logs" "Cloud Armor will allow only 203.0.113.7/32 (auto-detected)"
 echo
 if [[ $FAILS -eq 0 ]]; then echo "ALL PASSED"; else echo "$FAILS FAILED"; exit 1; fi
