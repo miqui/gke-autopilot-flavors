@@ -6,7 +6,7 @@ MR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$MR_DIR/../lib/common.sh"
 
 REGION_A="us-central1"; REGION_B="us-east1"
-DOMAIN=""; ALLOWED_IP=""; AUTH_NETS=""; ASSUME_YES=0
+DOMAIN=""; AUTH_NETS=""; ASSUME_YES=0
 SUBNET_A_RANGE="10.10.0.0/20"; PODS_A_RANGE="10.20.0.0/16"; SVC_A_RANGE="10.30.0.0/20"
 SUBNET_B_RANGE="10.11.0.0/20"; PODS_B_RANGE="10.21.0.0/16"; SVC_B_RANGE="10.31.0.0/20"
 
@@ -18,7 +18,7 @@ parse_multi_args() {
       --region-a) REGION_A="${args[i+1]:?--region-a needs a value}"; i=$((i+2));;
       --region-b) REGION_B="${args[i+1]:?--region-b needs a value}"; i=$((i+2));;
       --domain) DOMAIN="${args[i+1]:?--domain needs a value}"; i=$((i+2));;
-      --allowed-ip) ALLOWED_IP="${args[i+1]:?--allowed-ip needs a value}"; i=$((i+2));;
+      --allowed-ip|--allowed-ip=*) usage; die "unknown argument: ${args[i]} (--allowed-ip was removed; the caller's public IPv4 is auto-detected at runtime)";;
       --authorized-networks) AUTH_NETS="${args[i+1]:?--authorized-networks needs a value}"; i=$((i+2));;
       --yes) ASSUME_YES=1; i=$((i+1));;
       *) usage; die "unknown argument: ${args[i]}";;

@@ -6,6 +6,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MR="$HERE/.."
 STUB_DIR="$MR/../lib/test_stub"
 export PATH="$STUB_DIR:$PATH"
+CURL_STUB_LOG="$(mktemp "${TMPDIR:-/tmp}/mr-curl.XXXXXX")"; export CURL_STUB_LOG
 LOG="$(mktemp "${TMPDIR:-/tmp}/mr-stub.XXXXXX")"
 export GCLOUD_STUB_LOG="$LOG"
 FAILS=0; PASSES=0
@@ -14,7 +15,7 @@ fail() { FAILS=$((FAILS+1)); echo "FAIL - $1"; }
 assert_contains() { grep -qF -- "$2" <<<"$3" && pass "$1" || fail "$1 (missing: $2)"; }
 assert_not_contains() { grep -qF -- "$2" <<<"$3" && fail "$1 (unexpected: $2)" || pass "$1"; }
 
-COMMON=(--project-id test-proj --name mrha --domain app.maqlabs.ai --allowed-ip 203.0.113.7 --authorized-networks 198.51.100.0/24)
+COMMON=(--project-id test-proj --name mrha --domain app.maqlabs.ai --authorized-networks 198.51.100.0/24)
 
 out="$("$MR/create.sh" "${COMMON[@]}" --dry-run 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && pass "create dry-run exits 0" || fail "create dry-run rc=$rc"
@@ -49,14 +50,37 @@ bad="$(grep -E '^\[DRY-RUN\] gcloud ' <<<"$out" | grep -v -- '--project test-pro
 out="$("$MR/create.sh" "${COMMON[@]}" --region-a europe-west1 --region-b europe-west4 --dry-run 2>&1)"
 assert_contains "region override" "--region europe-west4" "$out"
 
-# validation
-out="$("$MR/create.sh" --project-id p --name mrha --domain app.maqlabs.ai --authorized-networks 1.2.3.4/32 --dry-run 2>&1)"; rc=$?
-[[ $rc -ne 0 ]] && pass "missing --allowed-ip rejected" || fail "missing --allowed-ip accepted"
-for badip in 999.1.1.1 1.2.3 1.2.3.4/33 abc "1.2.3.4/" 0.0.0.0/0; do
-  "$MR/create.sh" "${COMMON[@]/203.0.113.7/$badip}" --dry-run >/dev/null 2>&1 && fail "bad ip accepted: $badip" || pass "bad ip rejected: $badip"
+# --allowed-ip removed; IP is auto-detected (stub curl)
+out="$("$MR/create.sh" "${COMMON[@]}" --allowed-ip 203.0.113.7 --dry-run 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && pass "--allowed-ip rejected" || fail "--allowed-ip accepted"
+assert_contains "--allowed-ip hint" "auto-detected" "$out"
+"$MR/create.sh" "${COMMON[@]}" --allowed-ip=203.0.113.7 --dry-run >/dev/null 2>&1 && fail "--allowed-ip=IP accepted" || pass "--allowed-ip=IP rejected"
+"$MR/create.sh" "${COMMON[@]}" --allowed-ip 0.0.0.0/0 --dry-run >/dev/null 2>&1 && fail "--allowed-ip 0.0.0.0/0 accepted" || pass "--allowed-ip 0.0.0.0/0 rejected"
+: >"$CURL_STUB_LOG"
+out="$(CURL_STUB_IP=198.51.100.9 "$MR/create.sh" "${COMMON[@]}" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && pass "detection success" || fail "detection rc=$rc"
+assert_contains "logs auto-detected /32" "Cloud Armor will allow only 198.51.100.9/32 (auto-detected)" "$out"
+assert_contains "armor rule uses detected /32" "--src-ip-ranges 198.51.100.9/32" "$out"
+assert_not_contains "0.0.0.0/0 never produced" "0.0.0.0/0" "$out"
+[[ "$(wc -l <"$CURL_STUB_LOG")" -eq 1 ]] && grep -q 'checkip.amazonaws.com' "$CURL_STUB_LOG" && grep -q -- '-4 -fsS --max-time 5' "$CURL_STUB_LOG" && pass "only first URL queried (curl -4 -fsS --max-time 5)" || fail "unexpected curl calls"
+: >"$CURL_STUB_LOG"
+out="$(CURL_STUB_FAIL=checkip.amazonaws.com "$MR/create.sh" "${COMMON[@]}" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && grep -q 'api.ipify.org' "$CURL_STUB_LOG" && pass "fallback to 2nd URL" || fail "no fallback to 2nd URL"
+out="$(CURL_STUB_FAIL="checkip.amazonaws.com api.ipify.org" "$MR/create.sh" "${COMMON[@]}" --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && pass "fallback to 3rd URL" || fail "no fallback to 3rd URL"
+out="$(CURL_STUB_ALL_FAIL=1 "$MR/create.sh" "${COMMON[@]}" --dry-run 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && pass "all URLs fail => die" || fail "all URLs failed but exit 0"
+assert_contains "clear failure message" "could not auto-detect" "$out"
+for badip in 10.1.2.3 172.16.0.1 172.31.255.255 192.168.1.1 127.0.0.1 169.254.1.1 0.0.0.0 999.1.1.1 1.2.3 abc 1.2.3.4/32 ::1; do
+  CURL_STUB_IP="$badip" "$MR/create.sh" "${COMMON[@]}" --dry-run >/dev/null 2>&1 && fail "detected ip accepted: $badip" || pass "detected ip rejected: $badip"
 done
-"$MR/create.sh" "${COMMON[@]/203.0.113.7/198.51.100.0/24}" --dry-run >/dev/null 2>&1 && pass "CIDR allowed-ip accepted" || fail "CIDR allowed-ip rejected"
+# authorized networks default to detected /32 when omitted
+out="$("$MR/create.sh" --project-id test-proj --name mrha --domain app.maqlabs.ai --dry-run 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && pass "--authorized-networks optional" || fail "create without --authorized-networks rc=$rc"
+assert_contains "authorized networks default = detected /32" "--master-authorized-networks 203.0.113.7/32" "$out"
 "$MR/create.sh" "${COMMON[@]}" --region-a us-east1 --dry-run >/dev/null 2>&1 && fail "identical regions accepted" || pass "identical regions rejected"
+# existing armor rule => update path (static check; dry-run never reports resources as existing)
+grep -q 'security-policies rules update 1000.*ALLOWED_IP_CIDR' "$MR/create.sh" && pass "armor rule 1000 updated when it exists" || fail "armor update path missing"
 
 # destroy
 out="$("$MR/destroy.sh" --project-id test-proj --name mrha --dry-run 2>&1)"; rc=$?

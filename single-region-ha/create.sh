@@ -7,22 +7,22 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<U
-Usage: $0 --project-id ID --name NAME --allowed-ip IP[/CIDR] [options]
+Usage: $0 --project-id ID --name NAME [options]
 Required:
   --project-id ID                 GCP project
   --name NAME                     Resource name prefix / cluster name
-  --allowed-ip IP|CIDR            Only IPv4 allowed through Cloud Armor (default rule denies all)
+Cloud Armor allows ONLY this machine's public IPv4 (auto-detected as <ip>/32; default rule denies all).
 Optional:
   --region R                      Default us-central1
   --domain FQDN                   Hostname for Google-managed TLS (DNS printed for Cloudflare)
-  --master-authorized-networks L  Comma CIDRs for control-plane access (default: --allowed-ip)
+  --master-authorized-networks L  Comma CIDRs for control-plane access (default: auto-detected IP/32)
   --enable-backup                 Backup for GKE plan (daily, 7d retention)
   --dry-run                       Print mutating commands, do not run
   -h, --help
 U
 }
 
-ALLOWED_IP=""; DOMAIN=""; MAN=""; ENABLE_BACKUP=0
+DOMAIN=""; MAN=""; ENABLE_BACKUP=0
 validate_ipv4() {
   local v="$1" ip mask o
   ip="${v%%/*}"; mask=32; [[ "$v" == */* ]] && mask="${v#*/}"
@@ -37,7 +37,7 @@ parse_common_args "$@"
 set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
 while (($#)); do
   case "$1" in
-    --allowed-ip) ALLOWED_IP="${2:-}"; shift 2 ;;
+    --allowed-ip|--allowed-ip=*) usage; die "Unknown argument: $1 (--allowed-ip was removed; the caller's public IPv4 is auto-detected at runtime)" ;;
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --master-authorized-networks|--authorized-networks) MAN="${2:-}"; shift 2 ;;
     --enable-backup) ENABLE_BACKUP=1; shift ;;
@@ -46,12 +46,9 @@ while (($#)); do
   esac
 done
 REGION="${REGION:-us-central1}"
-[[ -n "$ALLOWED_IP" ]] || { usage; die "--allowed-ip is required"; }
-validate_ipv4 "$ALLOWED_IP" || die "--allowed-ip must be IPv4 or IPv4/CIDR: $ALLOWED_IP"
-[[ "$ALLOWED_IP" != 0.0.0.0/0 ]] || die "--allowed-ip 0.0.0.0/0 would defeat the allowlist"
-[[ "$ALLOWED_IP" == */* ]] || ALLOWED_IP="$ALLOWED_IP/32"
 if [[ -n "$DOMAIN" ]]; then validate_domain "$DOMAIN" || die "Invalid --domain: $DOMAIN"; fi
-MAN="${MAN:-$ALLOWED_IP}"
+set_allowed_ip_cidr   # local network call (also in --dry-run); sets ALLOWED_IP_CIDR=<ip>/32
+MAN="${MAN:-$ALLOWED_IP_CIDR}"
 IFS=, read -ra _m <<<"$MAN"
 for c in "${_m[@]}"; do validate_ipv4 "$c" || die "Bad master authorized network: $c"; [[ "$c" != */0 ]] || die "authorized networks must not include 0.0.0.0/0"; done
 [[ "$NAME" =~ ^[a-z]([a-z0-9-]{0,28}[a-z0-9])?$ ]] || die "--name must be lowercase letters/digits/hyphens, <=30 chars"
@@ -99,10 +96,15 @@ run gcloud container clusters update "$NAME" --region "$REGION" --gateway-api=st
 
 # --- Cloud Armor: allow only caller IP, default deny ------------------------
 resource_exists gcloud compute security-policies describe "$POLICY" "${P[@]}" ||
-  run gcloud compute security-policies create "$POLICY" --description "allow $ALLOWED_IP only" "${P[@]}"
-resource_exists gcloud compute security-policies rules describe 1000 --security-policy "$POLICY" "${P[@]}" ||
+  run gcloud compute security-policies create "$POLICY" --description "allow $ALLOWED_IP_CIDR only" "${P[@]}"
+if resource_exists gcloud compute security-policies rules describe 1000 --security-policy "$POLICY" "${P[@]}"; then
+  # Re-running from a different network re-detects the IP and updates the allow rule.
+  run gcloud compute security-policies rules update 1000 --security-policy "$POLICY" \
+    --src-ip-ranges "$ALLOWED_IP_CIDR" --action allow "${P[@]}"
+else
   run gcloud compute security-policies rules create 1000 --security-policy "$POLICY" \
-    --src-ip-ranges "$ALLOWED_IP" --action allow "${P[@]}"
+    --src-ip-ranges "$ALLOWED_IP_CIDR" --action allow "${P[@]}"
+fi
 run gcloud compute security-policies rules update 2147483647 --security-policy "$POLICY" \
   --action "deny-403" "${P[@]}"
 

@@ -14,7 +14,7 @@ exit 0
 S
 chmod +x "$TMP/bin/gcloud"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$TMP/bin/kubectl"; chmod +x "$TMP/bin/kubectl"
-export PATH="$TMP/bin:$PATH" GCLOUD_STUB_LOG="$TMP/log"
+export PATH="$TMP/bin:$HERE/../lib/test_stub:$PATH" GCLOUD_STUB_LOG="$TMP/log" CURL_STUB_LOG="$TMP/curl.log"
 : >"$GCLOUD_STUB_LOG"
 
 PASS=0; FAILN=0
@@ -25,18 +25,37 @@ expect_ok() { local d="$1"; shift; if "$@" >"$TMP/out" 2>&1; then ok "$d"; else 
 C=(--project-id test-proj --name demo)
 A=("$HERE/create.sh" "${C[@]}")
 
-expect_fail "create requires --allowed-ip" "${A[@]}" --dry-run
-expect_fail "rejects hostname as ip" "${A[@]}" --allowed-ip foo.com --dry-run
-expect_fail "rejects octet > 255" "${A[@]}" --allowed-ip 300.1.1.1 --dry-run
-expect_fail "rejects /33" "${A[@]}" --allowed-ip 1.2.3.4/33 --dry-run
-expect_fail "rejects 0.0.0.0/0" "${A[@]}" --allowed-ip 0.0.0.0/0 --dry-run
-expect_fail "rejects ipv6" "${A[@]}" --allowed-ip ::1 --dry-run
-expect_fail "rejects bad domain" "${A[@]}" --allowed-ip 1.2.3.4 --domain 'bad_domain' --dry-run
-expect_fail "rejects unknown flag" "${A[@]}" --allowed-ip 1.2.3.4 --bogus --dry-run
-expect_fail "requires --project-id" "$HERE/create.sh" --name demo --allowed-ip 1.2.3.4 --dry-run
+expect_fail "rejects bad domain" "${A[@]}" --domain 'bad_domain' --dry-run
+expect_fail "rejects unknown flag" "${A[@]}" --bogus --dry-run
+expect_fail "requires --project-id" "$HERE/create.sh" --name demo --dry-run
+# --allowed-ip was removed: any form is an unknown argument with a hint
+expect_fail "--allowed-ip rejected" "${A[@]}" --allowed-ip 203.0.113.7 --dry-run
+grep -q 'auto-detected' "$TMP/out" && ok "--allowed-ip error hints auto-detect" || bad "no auto-detect hint"
+expect_fail "--allowed-ip=IP rejected" "${A[@]}" --allowed-ip=203.0.113.7 --dry-run
+expect_fail "--allowed-ip 0.0.0.0/0 rejected" "${A[@]}" --allowed-ip 0.0.0.0/0 --dry-run
+
+# auto-detection (stub curl; no real network)
+: >"$CURL_STUB_LOG"
+expect_ok "detection: first URL success" env CURL_STUB_IP=198.51.100.9 "${A[@]}" --dry-run
+grep -q 'allow only 198.51.100.9/32 (auto-detected)' "$TMP/out" && ok "logs auto-detected /32" || bad "missing auto-detected log"
+grep -q -- '--src-ip-ranges 198.51.100.9/32' "$TMP/out" && ok "armor rule uses detected /32" || bad "armor rule not detected IP"
+grep -q -- '--master-authorized-networks 198.51.100.9/32' "$TMP/out" && ok "master networks default = detected /32" || bad "master networks default wrong"
+[[ "$(wc -l <"$CURL_STUB_LOG")" -eq 1 ]] && grep -q 'checkip.amazonaws.com' "$CURL_STUB_LOG" && grep -q -- '-4 -fsS --max-time 5' "$CURL_STUB_LOG" && ok "only first URL queried (curl -4 -fsS --max-time 5)" || bad "unexpected curl calls"
+: >"$CURL_STUB_LOG"
+expect_ok "detection: falls back to 2nd URL" env CURL_STUB_FAIL=checkip.amazonaws.com "${A[@]}" --dry-run
+grep -q 'api.ipify.org' "$CURL_STUB_LOG" && ok "fallback queried ipify" || bad "ipify not queried"
+expect_ok "detection: falls back to 3rd URL" env CURL_STUB_FAIL="checkip.amazonaws.com api.ipify.org" "${A[@]}" --dry-run
+expect_fail "detection: all URLs fail => die" env CURL_STUB_ALL_FAIL=1 "${A[@]}" --dry-run
+grep -q 'could not auto-detect' "$TMP/out" && ok "clear failure message" || bad "no failure message"
+for badip in 10.1.2.3 172.16.0.1 172.31.255.255 192.168.1.1 127.0.0.1 169.254.1.1 0.0.0.0 999.1.1.1 1.2.3 abc 1.2.3.4/32 ::1; do
+  expect_fail "detected '$badip' rejected" env CURL_STUB_IP="$badip" "${A[@]}" --dry-run
+done
+expect_ok "172.32.0.1 (outside 172.16/12) accepted" env CURL_STUB_IP=172.32.0.1 "${A[@]}" --dry-run
+expect_ok "whitespace trimmed" env CURL_STUB_IP="  203.0.113.7  " "${A[@]}" --dry-run
+if grep -q '0\.0\.0\.0/0' "$TMP/out"; then bad "0.0.0.0/0 produced"; else ok "0.0.0.0/0 never produced"; fi
 
 : >"$GCLOUD_STUB_LOG"
-expect_ok "dry-run create succeeds" "${A[@]}" --allowed-ip 203.0.113.7 --domain app.maqlabs.ai --enable-backup --dry-run
+expect_ok "dry-run create succeeds" "${A[@]}" --domain app.maqlabs.ai --enable-backup --dry-run
 cp "$TMP/out" "$TMP/create.out"
 grep -q 'create-auto demo' "$TMP/create.out" && ok "prints create-auto" || bad "create-auto missing"
 for pat in 'enable-private-nodes' 'deletion-protection' 'release-channel regular' '2147483647' 'deny-403' \
@@ -51,8 +70,10 @@ if grep -v -- '--project test-proj' "$GCLOUD_STUB_LOG" | grep -q .; then bad "gc
 
 # idempotency: everything exists -> no create commands printed
 # real lib: resource_exists is always false in dry-run, so use a live run against the stub
-expect_ok "re-run when resources exist (stub)" env STUB_EXISTS=1 "${A[@]}" --allowed-ip 203.0.113.7 --domain app.maqlabs.ai
+expect_ok "re-run when resources exist (stub)" env STUB_EXISTS=1 "${A[@]}" --domain app.maqlabs.ai
 if grep -q 'compute networks create\|create-auto' "$TMP/out"; then bad "re-run would recreate"; else ok "existing resources are not recreated"; fi
+grep -q 'security-policies rules update 1000.*--src-ip-ranges 203.0.113.7/32' "$TMP/out" && ok "existing armor rule is updated (new IP)" || bad "armor rule not updated on re-run"
+grep -q 'security-policies rules create 1000' "$TMP/out" && bad "armor rule re-created" || ok "armor rule not re-created"
 
 # destroy
 D=("$HERE/destroy.sh" "${C[@]}")

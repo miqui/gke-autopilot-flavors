@@ -9,24 +9,21 @@ source "$MR_DIR/attach_negs.sh"
 
 usage() {
   cat <<EOF
-Usage: create.sh --project-id P --name N --domain D --allowed-ip IP[/CIDR] --authorized-networks CIDR[,CIDR] [options]
+Usage: create.sh --project-id P --name N --domain D [--authorized-networks CIDR[,CIDR]] [options]
   --region-a R   first region  (default us-central1)
   --region-b R   second region (default us-east1)
   --domain D     custom domain served by the LB (e.g. app.maqlabs.ai); DNS lives on Cloudflare
-  --allowed-ip   the ONLY IPv4/CIDR Cloud Armor lets through (everything else gets 403)
-  --authorized-networks  CIDRs allowed to reach the GKE control plane endpoints
+  --authorized-networks  CIDRs allowed to reach the GKE control plane endpoints (default: auto-detected IP/32)
   --dry-run      print gcloud/kubectl commands without executing
+Cloud Armor lets through ONLY this machine's public IPv4 (auto-detected as <ip>/32; everything else gets 403).
 EOF
 }
 
 parse_multi_args "$@"
 [[ -n "$DOMAIN" ]] || { usage; die "--domain is required"; }
-[[ -n "$ALLOWED_IP" ]] || { usage; die "--allowed-ip is required"; }
-[[ -n "$AUTH_NETS" ]] || { usage; die "--authorized-networks is required"; }
-validate_ipv4_cidr "$ALLOWED_IP" || die "--allowed-ip must be an IPv4 address or CIDR, got: $ALLOWED_IP"
 [[ "$DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}$ ]] || die "--domain looks invalid: $DOMAIN"
-[[ "$ALLOWED_IP" == */* ]] || ALLOWED_IP="$ALLOWED_IP/32"
-[[ "$ALLOWED_IP" != */0 ]] || die "--allowed-ip $ALLOWED_IP would defeat the allowlist (0.0.0.0/0 not permitted)"
+set_allowed_ip_cidr   # local network call (also in --dry-run); sets ALLOWED_IP_CIDR=<ip>/32
+AUTH_NETS="${AUTH_NETS:-$ALLOWED_IP_CIDR}"
 IFS=, read -ra _an <<<"$AUTH_NETS"
 for _c in "${_an[@]}"; do
   validate_ipv4_cidr "$_c" || die "bad --authorized-networks entry: $_c"
@@ -98,13 +95,14 @@ certs() {
 
 armor() {
   create_if_missing "cloud armor policy $ARMOR" gcloud compute security-policies describe "$ARMOR" "${P[@]}" -- \
-    gcloud compute security-policies create "$ARMOR" --description "allow only $ALLOWED_IP" "${P[@]}"
+    gcloud compute security-policies create "$ARMOR" --description "allow only $ALLOWED_IP_CIDR" "${P[@]}"
   # Default rule (priority 2147483647) is created as allow; flip to deny(403). Idempotent.
   run gcloud compute security-policies rules update 2147483647 --security-policy "$ARMOR" --action deny-403 "${P[@]}"
   if resource_exists gcloud compute security-policies rules describe 1000 --security-policy "$ARMOR" "${P[@]}"; then
-    run gcloud compute security-policies rules update 1000 --security-policy "$ARMOR" --src-ip-ranges "$ALLOWED_IP" --action allow "${P[@]}"
+    # Re-running from a different network re-detects the IP and updates the allow rule.
+    run gcloud compute security-policies rules update 1000 --security-policy "$ARMOR" --src-ip-ranges "$ALLOWED_IP_CIDR" --action allow "${P[@]}"
   else
-    run gcloud compute security-policies rules create 1000 --security-policy "$ARMOR" --src-ip-ranges "$ALLOWED_IP" --action allow \
+    run gcloud compute security-policies rules create 1000 --security-policy "$ARMOR" --src-ip-ranges "$ALLOWED_IP_CIDR" --action allow \
       --description "caller IP only" "${P[@]}"
   fi
 }

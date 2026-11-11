@@ -77,3 +77,42 @@ resource_exists() {
   [[ "${DRY_RUN}" == "1" ]] && return 1
   "$@" >/dev/null 2>&1
 }
+
+# is_public_ipv4 <ip>: 0 if strict dotted-quad (octets 0-255, no leading zeros)
+# and NOT 0.0.0.0 / loopback / private / link-local.
+is_public_ipv4() {
+  local ip="${1:-}" o a b
+  [[ "$ip" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]] || return 1
+  for o in "${BASH_REMATCH[@]:1}"; do ((o <= 255)) || return 1; done
+  a="${BASH_REMATCH[1]}"; b="${BASH_REMATCH[2]}"
+  [[ "$ip" != 0.0.0.0 ]] || return 1
+  ((a != 10 && a != 127)) || return 1
+  ((a != 172 || b < 16 || b > 31)) || return 1
+  ((a != 192 || b != 168)) || return 1
+  ((a != 169 || b != 254)) || return 1
+  return 0
+}
+
+# detect_public_ipv4: print this machine's public IPv4 (local network call, not GCP).
+# Tries several echo services in order; dies if none returns a valid public IPv4.
+detect_public_ipv4() {
+  local url raw ip
+  for url in https://checkip.amazonaws.com https://api.ipify.org https://ifconfig.me/ip; do
+    raw="$(curl -4 -fsS --max-time 5 "$url" 2>/dev/null)" || continue
+    ip="$(printf '%s' "$raw" | tr -d '[:space:]')"
+    if is_public_ipv4 "$ip"; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  done
+  die "could not auto-detect a public IPv4 (tried checkip.amazonaws.com, api.ipify.org, ifconfig.me); check your network/VPN/proxy"
+}
+
+# set_allowed_ip_cidr: detect caller IP, set global ALLOWED_IP_CIDR=<ip>/32 and log it.
+ALLOWED_IP_CIDR=""
+set_allowed_ip_cidr() {
+  local ip
+  ip="$(detect_public_ipv4)" || exit 1
+  ALLOWED_IP_CIDR="$ip/32"
+  log_info "Cloud Armor will allow only $ALLOWED_IP_CIDR (auto-detected)"
+}

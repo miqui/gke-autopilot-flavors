@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Offline curl stub for tests: never touches the network.
+# CURL_STUB_IP          body returned on success (default 203.0.113.7)
+# CURL_STUB_FAIL        space-separated URL substrings that fail (exit 22)
+# CURL_STUB_ALL_FAIL=1  every call fails
+# CURL_STUB_LOG         file receiving the args of each call
+url="${*: -1}"
+printf '%s\n' "$*" >> "${CURL_STUB_LOG:-/dev/null}"
+[[ "${CURL_STUB_ALL_FAIL:-0}" != 1 ]] || exit 22
+for s in ${CURL_STUB_FAIL:-}; do [[ "$url" == *"$s"* ]] && exit 22; done
+printf '%s\n' "${CURL_STUB_IP:-203.0.113.7}"
